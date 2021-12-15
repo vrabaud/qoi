@@ -34,6 +34,8 @@ SOFTWARE.
 #include <stdio.h>
 #include <dirent.h>
 #include <png.h>
+#include <webp/decode.h>
+#include <webp/encode.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
@@ -166,7 +168,7 @@ void *libpng_encode(void *pixels, int w, int h, int channels, int *out_len) {
 	libpng_write_t write_data = {
 		.size = 0,
 		.capacity = w * h * channels,
-		.data = malloc(w * h * channels)
+		.data = (unsigned char*)malloc(w * h * channels)
 	};
 
 	png_set_rows(png, info, row_pointers);
@@ -213,7 +215,7 @@ void *libpng_decode(void *data, int size, int *out_w, int *out_h) {
 	libpng_read_t read_data = {
 		.pos = 0,
 		.size = size,
-		.data = data
+		.data = (unsigned char*)data
 	};
 	
 	png_set_read_fn(png, &read_data, png_decode_callback);
@@ -252,7 +254,7 @@ void *libpng_decode(void *data, int size, int *out_w, int *out_h) {
 	
 	png_read_update_info(png, info);
 
-	unsigned char* out = malloc(w * h * 4);
+	unsigned char* out = (unsigned char*)malloc(w * h * 4);
 	*out_w = w;
 	*out_h = h;
 	
@@ -315,6 +317,7 @@ void *fload(const char *path, int *out_size) {
 
 int opt_runs = 1;
 int opt_nopng = 0;
+int opt_nowebp = 0;
 int opt_nowarmup = 0;
 int opt_noverify = 0;
 int opt_nodecode = 0;
@@ -338,6 +341,7 @@ typedef struct {
 	benchmark_lib_result_t libpng;
 	benchmark_lib_result_t stbi;
 	benchmark_lib_result_t qoi;
+	benchmark_lib_result_t webp;
 } benchmark_result_t;
 
 
@@ -350,6 +354,9 @@ void benchmark_print_result(benchmark_result_t res) {
 	res.stbi.encode_time /= res.count;
 	res.stbi.decode_time /= res.count;
 	res.stbi.size /= res.count;
+	res.webp.encode_time /= res.count;
+	res.webp.decode_time /= res.count;
+	res.webp.size /= res.count;
 	res.qoi.encode_time /= res.count;
 	res.qoi.decode_time /= res.count;
 	res.qoi.size /= res.count;
@@ -374,6 +381,17 @@ void benchmark_print_result(benchmark_result_t res) {
 			(res.stbi.encode_time > 0 ? px / ((double)res.stbi.encode_time/1000.0) : 0),
 			res.stbi.size/1024,
 			((double)res.stbi.size/(double)res.raw_size) * 100.0
+		);
+	}
+	if (!opt_nowebp) {
+		printf(
+			"webp:    %8.1f    %8.1f      %8.2f      %8.2f  %8d   %4.1f%%\n", 
+			(double)res.webp.decode_time/1000000.0,
+			(double)res.webp.encode_time/1000000.0,
+			(res.webp.decode_time > 0 ? px / ((double)res.webp.decode_time/1000.0) : 0),
+			(res.webp.encode_time > 0 ? px / ((double)res.webp.encode_time/1000.0) : 0),
+			res.webp.size/1024,
+			((double)res.webp.size/(double)res.raw_size) * 100.0
 		);
 	}
 	printf(
@@ -408,6 +426,7 @@ void benchmark_print_result(benchmark_result_t res) {
 benchmark_result_t benchmark_image(const char *path) {
 	int encoded_png_size;
 	int encoded_qoi_size;
+	int encoded_webp_size;
 	int w;
 	int h;
 	int channels;
@@ -429,6 +448,9 @@ benchmark_result_t benchmark_image(const char *path) {
 			.channels = channels,
 			.colorspace = QOI_SRGB
 		}, &encoded_qoi_size);
+	uint8_t* encoded_webp;
+	encoded_webp_size = (channels==3) ? WebPEncodeLosslessRGB((const uint8_t *)pixels, w, h, w, &encoded_webp):
+										WebPEncodeLosslessRGBA((const uint8_t *)pixels, w, h, w, &encoded_webp);
 
 	if (!pixels || !encoded_qoi || !encoded_png) {
 		ERROR("Error decoding %s", path);
@@ -467,7 +489,15 @@ benchmark_result_t benchmark_image(const char *path) {
 
 			BENCHMARK_FN(opt_nowarmup, opt_runs, res.stbi.decode_time, {
 				int dec_w, dec_h, dec_channels;
-				void *dec_p = stbi_load_from_memory(encoded_png, encoded_png_size, &dec_w, &dec_h, &dec_channels, 4);
+				void *dec_p = stbi_load_from_memory((const stbi_uc *)encoded_png, encoded_png_size, &dec_w, &dec_h, &dec_channels, 4);
+				free(dec_p);
+			});
+		}
+
+		if (!opt_nowebp) {
+			BENCHMARK_FN(opt_nowarmup, opt_runs, res.webp.decode_time, {
+				int dec_w, dec_h;
+				uint8_t *dec_p = WebPDecodeRGB((const uint8_t *)encoded_webp, encoded_webp_size, &dec_w, &dec_h);
 				free(dec_p);
 			});
 		}
@@ -497,6 +527,15 @@ benchmark_result_t benchmark_image(const char *path) {
 			});
 		}
 
+		if (!opt_nowebp) {
+			BENCHMARK_FN(opt_nowarmup, opt_runs, res.webp.encode_time, {
+				uint8_t* buf;
+				res.webp.size = (channels==3) ? WebPEncodeLosslessRGB((const uint8_t *)pixels, w, h, 3*w, &buf):
+												WebPEncodeLosslessRGBA((const uint8_t *)pixels, w, h, 4*w, &buf);
+				WebPFree(buf);
+			});
+		}
+
 		BENCHMARK_FN(opt_nowarmup, opt_runs, res.qoi.encode_time, {
 			int enc_size;
 			void *enc_p = qoi_encode(pixels, &(qoi_desc){
@@ -513,6 +552,7 @@ benchmark_result_t benchmark_image(const char *path) {
 	free(pixels);
 	free(encoded_png);
 	free(encoded_qoi);
+	WebPFree(encoded_webp);
 
 	return res;
 }
@@ -556,7 +596,7 @@ void benchmark_directory(const char *path, benchmark_result_t *grand_total) {
 			printf("## Benchmarking %s/*.png -- %d runs\n\n", path, opt_runs);
 		}
 
-		char *file_path = malloc(strlen(file->d_name) + strlen(path)+8);
+		char *file_path = (char*)malloc(strlen(file->d_name) + strlen(path)+8);
 		sprintf(file_path, "%s/%s", path, file->d_name);
 		
 		benchmark_result_t res = benchmark_image(file_path);
@@ -577,6 +617,9 @@ void benchmark_directory(const char *path, benchmark_result_t *grand_total) {
 		dir_total.stbi.encode_time += res.stbi.encode_time;
 		dir_total.stbi.decode_time += res.stbi.decode_time;
 		dir_total.stbi.size += res.stbi.size;
+		dir_total.webp.encode_time += res.webp.encode_time;
+		dir_total.webp.decode_time += res.webp.decode_time;
+		dir_total.webp.size += res.webp.size;
 		dir_total.qoi.encode_time += res.qoi.encode_time;
 		dir_total.qoi.decode_time += res.qoi.decode_time;
 		dir_total.qoi.size += res.qoi.size;
@@ -590,6 +633,9 @@ void benchmark_directory(const char *path, benchmark_result_t *grand_total) {
 		grand_total->stbi.encode_time += res.stbi.encode_time;
 		grand_total->stbi.decode_time += res.stbi.decode_time;
 		grand_total->stbi.size += res.stbi.size;
+		grand_total->webp.encode_time += res.webp.encode_time;
+		grand_total->webp.decode_time += res.webp.decode_time;
+		grand_total->webp.size += res.webp.size;
 		grand_total->qoi.encode_time += res.qoi.encode_time;
 		grand_total->qoi.decode_time += res.qoi.decode_time;
 		grand_total->qoi.size += res.qoi.size;
@@ -608,6 +654,7 @@ int main(int argc, char **argv) {
 		printf("Options:\n");
 		printf("    --nowarmup ... don't perform a warmup run\n");
 		printf("    --nopng ...... don't run png encode/decode\n");
+		printf("    --nowebp ..... don't run WebP encode/decode\n");
 		printf("    --noverify ... don't verify qoi roundtrip\n");
 		printf("    --noencode ... don't run encoders\n");
 		printf("    --nodecode ... don't run decoders\n");
@@ -622,6 +669,7 @@ int main(int argc, char **argv) {
 	for (int i = 3; i < argc; i++) {
 		if (strcmp(argv[i], "--nowarmup") == 0) { opt_nowarmup = 1; }
 		else if (strcmp(argv[i], "--nopng") == 0) { opt_nopng = 1; }
+		else if (strcmp(argv[i], "--nowebp") == 0) { opt_nowebp = 1; }
 		else if (strcmp(argv[i], "--noverify") == 0) { opt_noverify = 1; }
 		else if (strcmp(argv[i], "--noencode") == 0) { opt_noencode = 1; }
 		else if (strcmp(argv[i], "--nodecode") == 0) { opt_nodecode = 1; }
